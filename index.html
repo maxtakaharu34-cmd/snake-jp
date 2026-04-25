@@ -245,7 +245,11 @@ canvas#game {
   btnMute.textContent = Sound.isMuted() ? '🔇' : '🔊';
 
   // ---------- State ----------
-  const FOOD_TYPES = ['apple', 'apple', 'apple', 'apple', 'gem', 'star', 'bolt', 'slow', 'bomb'];
+  // Bomb is gated separately by level + low base chance to avoid early frustration.
+  // Apple is heavily weighted so the field stays comfortably playable.
+  const FOOD_TABLE_SAFE  = ['apple','apple','apple','apple','apple','apple','apple','apple','gem','star','bolt','slow'];
+  const FOOD_TABLE_LATE  = ['apple','apple','apple','apple','apple','gem','star','bolt','slow','bomb'];
+  const BOMB_LIFETIME    = 7000; // ms — bombs vanish on their own
 
   const state = {
     snake: [],     // [{x,y}]
@@ -260,10 +264,11 @@ canvas#game {
     starUntil: 0,
     speedBuff: 0,  // ms remaining for fast/slow
     speedMode: 0,  // 1=fast, -1=slow
-    speedMs: 140,  // base speed (ms/step)
+    speedMs: 180,  // base speed (ms/step) — gentler than classic
     over: false,
     paused: true,
-    moveCounter: 0
+    moveCounter: 0,
+    graceUntil: 0  // brief invuln after spawn / game start
   };
   bestEl.textContent = state.best;
 
@@ -279,10 +284,11 @@ canvas#game {
     state.starUntil = 0;
     state.speedBuff = 0;
     state.speedMode = 0;
-    state.speedMs = 140;
+    state.speedMs = 180;
     state.over = false;
     state.paused = false;
     state.moveCounter = 0;
+    state.graceUntil = performance.now() + 1500; // 1.5s start-of-game grace
     spawnFood('apple');
     spawnFood();
     updateHud();
@@ -315,8 +321,15 @@ canvas#game {
     }
     if (empties.length === 0) return;
     const cell = empties[Math.floor(Math.random() * empties.length)];
-    const type = forceType || FOOD_TYPES[Math.floor(Math.random() * FOOD_TYPES.length)];
-    state.foods.push({ x: cell.x, y: cell.y, type, age: 0 });
+    let type;
+    if (forceType) {
+      type = forceType;
+    } else {
+      // Bombs only enter the pool from level 3 onward
+      const table = state.lvl >= 3 ? FOOD_TABLE_LATE : FOOD_TABLE_SAFE;
+      type = table[Math.floor(Math.random() * table.length)];
+    }
+    state.foods.push({ x: cell.x, y: cell.y, type, spawnedAt: performance.now() });
   }
 
   function applyDir(name) {
@@ -350,17 +363,17 @@ canvas#game {
     const nx = head.x + state.dir.dx;
     const ny = head.y + state.dir.dy;
     const star = performance.now() < state.starUntil;
-    // Wall collision (no wrap)
+    const grace = performance.now() < state.graceUntil;
+    // Wall collision: wraps during star or grace, else die
     if (nx < 0 || nx >= COLS || ny < 0 || ny >= ROWS) {
-      if (star) {
-        // Wrap during invincibility
+      if (star || grace) {
         wrapMove(nx, ny);
       } else {
         return die();
       }
     } else {
-      // Self collision
-      if (!star && state.snake.some((s, i) => i > 0 && s.x === nx && s.y === ny)) return die();
+      // Self collision (also forgiven during grace)
+      if (!star && !grace && state.snake.some((s, i) => i > 0 && s.x === nx && s.y === ny)) return die();
       state.snake.unshift({ x: nx, y: ny });
     }
     // Food collision
@@ -387,14 +400,23 @@ canvas#game {
       if (Math.random() < 0.35 && state.foods.length < 4) spawnFood();
     }
 
-    // Foods age — bombs after 8s vanish (mercy)
+    // Despawn bombs that have been on the field too long (mercy)
+    {
+      const now = performance.now();
+      for (let i = state.foods.length - 1; i >= 0; i--) {
+        const f = state.foods[i];
+        if (f.type === 'bomb' && now - (f.spawnedAt || 0) > BOMB_LIFETIME) {
+          state.foods.splice(i, 1);
+        }
+      }
+    }
     state.moveCounter++;
 
-    // Level up every 10 apples-equivalent (score thresholds)
-    const newLvl = 1 + Math.floor(state.score / 100);
+    // Level up every 150 score; speed-up is gentle and capped
+    const newLvl = 1 + Math.floor(state.score / 150);
     if (newLvl > state.lvl) {
       state.lvl = newLvl;
-      state.speedMs = Math.max(70, 140 - (state.lvl - 1) * 8);
+      state.speedMs = Math.max(95, 180 - (state.lvl - 1) * 6);
       showBanner('LV ' + state.lvl + ' UP!', 'power', 700);
     }
     updateHud();
